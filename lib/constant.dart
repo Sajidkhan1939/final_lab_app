@@ -95,7 +95,7 @@ var createContent = GoogleFonts.roboto(
   textStyle: TextStyle(
     letterSpacing: 1.0,
     fontSize: 20.0,
-    height: 1.5,
+    height: 2.5,
     fontWeight: FontWeight.w400,
   ),
 );
