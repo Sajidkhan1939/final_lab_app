@@ -1,117 +1,205 @@
-import 'package:flutter/material.dart';
+import 'dart:io';
+import 'dart:math';
 
-void main() {
-  runApp(MyApp());
+import 'package:args/args.dart';
+import 'package:flutter_launcher_icons/utils.dart';
+import 'package:path/path.dart' as path;
+import 'package:yaml/yaml.dart';
+import 'package:flutter_launcher_icons/android.dart' as android_launcher_icons;
+import 'package:flutter_launcher_icons/ios.dart' as ios_launcher_icons;
+import 'package:flutter_launcher_icons/constants.dart';
+import 'package:flutter_launcher_icons/custom_exceptions.dart';
+
+const String fileOption = 'file';
+const String helpFlag = 'help';
+const String defaultConfigFile = 'flutter_launcher_icons.yaml';
+const String flavorConfigFilePattern = r'^flutter_launcher_icons-(.*).yaml$';
+String flavorConfigFile(String flavor) => 'flutter_launcher_icons-$flavor.yaml';
+
+List<String> getFlavors() {
+  List<String> flavors = [];
+  for (var item in Directory('.').listSync()) {
+    if (item is File) {
+      final name = path.basename(item.path);
+      final match = RegExp(flavorConfigFilePattern).firstMatch(name);
+      if (match != null) {
+        flavors.add(match.group(1));
+      }
+    }
+  }
+  return flavors;
 }
 
-class MyApp extends StatelessWidget {
-  // This widget is the root of your application.
-  @override
-  Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'Flutter Demo',
-      theme: ThemeData(
-        // This is the theme of your application.
-        //
-        // Try running your application with "flutter run". You'll see the
-        // application has a blue toolbar. Then, without quitting the app, try
-        // changing the primarySwatch below to Colors.green and then invoke
-        // "hot reload" (press "r" in the console where you ran "flutter run",
-        // or simply save your changes to "hot reload" in a Flutter IDE).
-        // Notice that the counter didn't reset back to zero; the application
-        // is not restarted.
-        primarySwatch: Colors.blue,
-        // This makes the visual density adapt to the platform that you run
-        // the app on. For desktop platforms, the controls will be smaller and
-        // closer together (more dense) than on mobile platforms.
-        visualDensity: VisualDensity.adaptivePlatformDensity,
-      ),
-      home: MyHomePage(title: 'Flutter Demo Home Page'),
-    );
+Future<void> createIconsFromArguments(List<String> arguments) async {
+  final ArgParser parser = ArgParser(allowTrailingOptions: true);
+  parser.addFlag(helpFlag, abbr: 'h', help: 'Usage help', negatable: false);
+  // Make default null to differentiate when it is explicitly set
+  parser.addOption(fileOption,
+      abbr: 'f', help: 'Config file (default: $defaultConfigFile)');
+  final ArgResults argResults = parser.parse(arguments);
+
+  if (argResults[helpFlag]) {
+    stdout.writeln('Generates icons for iOS and Android');
+    stdout.writeln(parser.usage);
+    exit(0);
+  }
+
+  // Flavors manangement
+  var flavors = getFlavors();
+  var hasFlavors = flavors.isNotEmpty;
+
+  // Load the config file
+  final Map<String, dynamic> yamlConfig =
+      loadConfigFileFromArgResults(argResults, verbose: true);
+
+  // Create icons
+  if ( !hasFlavors ) {
+    try {
+      createIconsFromConfig(yamlConfig);
+    } catch (e) {
+      stderr.writeln(e);
+      exit(2);
+    } finally {
+      print('\n✓ Successfully generated launcher icons');
+    }
+  } else {
+    try {
+      for (String flavor in flavors) {
+        print('\nFlavor: $flavor');
+        final Map<String, dynamic> yamlConfig = loadConfigFile(flavorConfigFile(flavor), flavorConfigFile(flavor));
+        await createIconsFromConfig(yamlConfig, flavor);
+      }
+    } catch (e) {
+      stderr.writeln(e);
+      exit(2);
+    } finally {
+      print('\n✓ Successfully generated launcher icons for flavors');
+    }
   }
 }
 
-class MyHomePage extends StatefulWidget {
-  MyHomePage({Key key, this.title}) : super(key: key);
+Future<void> createIconsFromConfig(Map<String, dynamic> config, [String flavor]) async {
+  if (!isImagePathInConfig(config)) {
+    throw const InvalidConfigException(errorMissingImagePath);
+  }
+  if (!hasPlatformConfig(config)) {
+    throw const InvalidConfigException(errorMissingPlatform);
+  }
 
-  // This widget is the home page of your application. It is stateful, meaning
-  // that it has a State object (defined below) that contains fields that affect
-  // how it looks.
+  if (isNeedingNewAndroidIcon(config) || hasAndroidAdaptiveConfig(config)) {
+    final int minSdk = android_launcher_icons.minSdk();
+    if (minSdk < 26 &&
+        hasAndroidAdaptiveConfig(config) &&
+        !hasAndroidConfig(config)) {
+      throw const InvalidConfigException(errorMissingRegularAndroid);
+    }
+  }
 
-  // This class is the configuration for the state. It holds the values (in this
-  // case the title) provided by the parent (in this case the App widget) and
-  // used by the build method of the State. Fields in a Widget subclass are
-  // always marked "final".
+  if (isNeedingNewAndroidIcon(config)) {
+    android_launcher_icons.createDefaultIcons(config, flavor);
+  }
+  if (hasAndroidAdaptiveConfig(config)) {
+    android_launcher_icons.createAdaptiveIcons(config, flavor);
+  }
+  if (isNeedingNewIOSIcon(config)) {
+    ios_launcher_icons.createIcons(config, flavor);
 
-  final String title;
-
-  @override
-  _MyHomePageState createState() => _MyHomePageState();
+  }
 }
 
-class _MyHomePageState extends State<MyHomePage> {
-  int _counter = 0;
+Map<String, dynamic> loadConfigFileFromArgResults(ArgResults argResults,
+    {bool verbose}) {
+  verbose ??= false;
+  final String configFile = argResults[fileOption];
+  final String fileOptionResult = argResults[fileOption];
 
-  void _incrementCounter() {
-    setState(() {
-      // This call to setState tells the Flutter framework that something has
-      // changed in this State, which causes it to rerun the build method below
-      // so that the display can reflect the updated values. If we changed
-      // _counter without calling setState(), then the build method would not be
-      // called again, and so nothing would appear to happen.
-      _counter++;
-    });
+  // if icon is given, try to load icon
+  if (configFile != null && configFile != defaultConfigFile) {
+    try {
+      return loadConfigFile(configFile, fileOptionResult);
+    } catch (e) {
+      if (verbose) {
+        stderr.writeln(e);
+      }
+
+      return null;
+    }
   }
 
-  @override
-  Widget build(BuildContext context) {
-    // This method is rerun every time setState is called, for instance as done
-    // by the _incrementCounter method above.
-    //
-    // The Flutter framework has been optimized to make rerunning build methods
-    // fast, so that you can just rebuild anything that needs updating rather
-    // than having to individually change instances of widgets.
-    return Scaffold(
-      appBar: AppBar(
-        // Here we take the value from the MyHomePage object that was created by
-        // the App.build method, and use it to set our appbar title.
-        title: Text(widget.title),
-      ),
-      body: Center(
-        // Center is a layout widget. It takes a single child and positions it
-        // in the middle of the parent.
-        child: Column(
-          // Column is also a layout widget. It takes a list of children and
-          // arranges them vertically. By default, it sizes itself to fit its
-          // children horizontally, and tries to be as tall as its parent.
-          //
-          // Invoke "debug painting" (press "p" in the console, choose the
-          // "Toggle Debug Paint" action from the Flutter Inspector in Android
-          // Studio, or the "Toggle Debug Paint" command in Visual Studio Code)
-          // to see the wireframe for each widget.
-          //
-          // Column has various properties to control how it sizes itself and
-          // how it positions its children. Here we use mainAxisAlignment to
-          // center the children vertically; the main axis here is the vertical
-          // axis because Columns are vertical (the cross axis would be
-          // horizontal).
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: <Widget>[
-            Text(
-              'You have pushed the button this many times:',
-            ),
-            Text(
-              '$_counter',
-              style: Theme.of(context).textTheme.headline4,
-            ),
-          ],
-        ),
-      ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: _incrementCounter,
-        tooltip: 'Increment',
-        child: Icon(Icons.add),
-      ), // This trailing comma makes auto-formatting nicer for build methods.
-    );
+  // If none set try flutter_launcher_icons.yaml first then pubspec.yaml
+  // for compatibility
+  try {
+    return loadConfigFile(defaultConfigFile, fileOptionResult);
+  } catch (e) {
+    // Try pubspec.yaml for compatibility
+    if (configFile == null) {
+      try {
+        return loadConfigFile('pubspec.yaml', fileOptionResult);
+      } catch (_) {}
+    }
+
+    // if nothing got returned, print error
+    if (verbose) {
+      stderr.writeln(e);
+    }
   }
+
+  return null;
+}
+
+Map<String, dynamic> loadConfigFile(String path, String fileOptionResult) {
+  final File file = File(path);
+  final String yamlString = file.readAsStringSync();
+  // ignore: always_specify_types
+  final Map yamlMap = loadYaml(yamlString);
+
+  if (yamlMap == null || !(yamlMap['flutter_icons'] is Map)) {
+    stderr.writeln(NoConfigFoundException('Check that your config file '
+        '`${fileOptionResult ?? defaultConfigFile}`'
+        ' has a `flutter_icons` section'));
+    exit(1);
+  }
+
+  // yamlMap has the type YamlMap, which has several unwanted sideeffects
+  final Map<String, dynamic> config = <String, dynamic>{};
+  for (MapEntry<dynamic, dynamic> entry in yamlMap['flutter_icons'].entries) {
+    config[entry.key] = entry.value;
+  }
+
+  return config;
+}
+
+bool isImagePathInConfig(Map<String, dynamic> flutterIconsConfig) {
+  return flutterIconsConfig.containsKey('image_path') ||
+      (flutterIconsConfig.containsKey('image_path_android') &&
+          flutterIconsConfig.containsKey('image_path_ios'));
+}
+
+bool hasPlatformConfig(Map<String, dynamic> flutterIconsConfig) {
+  return hasAndroidConfig(flutterIconsConfig) ||
+      hasIOSConfig(flutterIconsConfig);
+}
+
+bool hasAndroidConfig(Map<String, dynamic> flutterLauncherIcons) {
+  return flutterLauncherIcons.containsKey('android');
+}
+
+bool isNeedingNewAndroidIcon(Map<String, dynamic> flutterLauncherIconsConfig) {
+  return hasAndroidConfig(flutterLauncherIconsConfig) &&
+      flutterLauncherIconsConfig['android'] != false;
+}
+
+bool hasAndroidAdaptiveConfig(Map<String, dynamic> flutterLauncherIconsConfig) {
+  return isNeedingNewAndroidIcon(flutterLauncherIconsConfig) &&
+      flutterLauncherIconsConfig.containsKey('adaptive_icon_background') &&
+      flutterLauncherIconsConfig.containsKey('adaptive_icon_foreground');
+}
+
+bool hasIOSConfig(Map<String, dynamic> flutterLauncherIconsConfig) {
+  return flutterLauncherIconsConfig.containsKey('ios');
+}
+
+bool isNeedingNewIOSIcon(Map<String, dynamic> flutterLauncherIconsConfig) {
+  return hasIOSConfig(flutterLauncherIconsConfig) &&
+      flutterLauncherIconsConfig['ios'] != false;
 }
